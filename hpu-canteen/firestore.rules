@@ -1,0 +1,82 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function profileRole() {
+      let userPath = /databases/$(database)/documents/users/$(request.auth.uid);
+      return signedIn() && exists(userPath)
+        ? get(userPath).data.get('role', 'customer')
+        : 'customer';
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && (request.auth.token.get('role', '') == 'admin'
+          || request.auth.token.get('admin', false) == true
+          || profileRole() == 'admin');
+    }
+
+    function isStaff() {
+      return signedIn()
+        && (request.auth.token.get('role', '') in ['staff', 'kitchen', 'cashier']
+          || request.auth.token.get('staff', false) == true
+          || profileRole() in ['staff', 'kitchen', 'cashier']);
+    }
+
+    function isTeam() {
+      return isAdmin() || isStaff();
+    }
+
+    match /users/{userId} {
+      allow create: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.role == 'customer';
+      allow read: if signedIn()
+        && (request.auth.uid == userId || isAdmin());
+      allow update: if (signedIn()
+          && request.auth.uid == userId
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['displayName', 'phone', 'studentId', 'updatedAt']))
+        || (isAdmin()
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['displayName', 'phone', 'studentId']));
+      allow delete: if isAdmin();
+    }
+
+    match /menuItems/{itemId} {
+      allow read: if isTeam() || resource.data.active == true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /categories/{categoryId} {
+      allow read: if isTeam() || resource.data.active == true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /pickupSlots/{slotId} {
+      allow read: if isTeam() || resource.data.enabled == true;
+      allow create, update, delete: if isAdmin();
+    }
+
+    match /orders/{orderId} {
+      allow create: if signedIn()
+        && !isTeam()
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.status == 'received'
+        && request.resource.data.total is number
+        && request.resource.data.items is list;
+      allow read: if signedIn()
+        && (resource.data.userId == request.auth.uid || isTeam());
+      allow update: if isAdmin() || (isStaff()
+        && request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['status', 'updatedAt', 'staffNote'])
+        && request.resource.data.status in [
+          'received', 'preparing', 'ready', 'completed', 'cancelled'
+        ]);
+      allow delete: if isAdmin();
+    }
+  }
+}
